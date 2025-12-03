@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>給小白</title>
+    <style>
+        /* ----- CSS 樣式 ----- */
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #050505; /* 深色背景 */
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none; /* 禁止手機預設滑動行為 */
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent; /* 移除點擊高亮 */
+        }
+
+        /* UI 面板已完全移除 */
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // ----- JavaScript 程式碼 -----
+
+        // --- 全局變數 ---
+        let scene, camera, renderer, particles, particleGeometry, particleMaterial;
+        let heartGroup;
+        let textSprite = null;
+        
+        // ★ 在這裡修改你的驚喜文字 ★
+        const HIDDEN_MESSAGE = "給天下第一好的小白";
+
+        const PARTICLE_COUNT = 15000; 
+        const PARTICLE_SIZE = 0.2; 
+        
+        // 預設顏色
+        let colorBottom = new THREE.Color("#4400ff");
+        let colorTop = new THREE.Color("#ff0055");
+
+        let targetInteractionFactor = 0; 
+        let currentInteractionFactor = 0; 
+        
+        let mouseX = 0;
+        let mouseY = 0;
+
+        let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        let explosionDirections = new Float32Array(PARTICLE_COUNT * 3);
+
+        let explosionState = 'idle'; 
+        let waitStartTime = 0; 
+        const WAIT_DURATION = 5000; 
+
+        // 音樂變數
+        let bgMusic = null;
+        let hasUserInteracted = false; 
+
+        // --- Three.js 初始化 ---
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            if (!container) return;
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+            camera.position.z = 45; 
+            camera.position.y = 0; 
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            
+            container.appendChild(renderer.domElement);
+            
+            // 綁定互動事件 (觸控與點擊)
+            renderer.domElement.addEventListener('touchstart', onCanvasTouchStart, { passive: false });
+            renderer.domElement.addEventListener('click', onCanvasTouchStart);
+
+            heartGroup = new THREE.Group();
+            scene.add(heartGroup);
+
+            // 1. 建立粒子系統
+            particleGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            const colors = new Float32Array(PARTICLE_COUNT * 3);
+            
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                positions[i] = (Math.random() - 0.5) * 100;
+                colors[i] = 1; 
+            }
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                const speed = 0.5 + Math.random() * 0.5; 
+
+                explosionDirections[idx] = Math.sin(phi) * Math.cos(theta) * speed;
+                explosionDirections[idx + 1] = Math.sin(phi) * Math.sin(theta) * speed;
+                explosionDirections[idx + 2] = Math.cos(phi) * speed;
+            }
+            
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            particleMaterial = new THREE.PointsMaterial({
+                size: PARTICLE_SIZE,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                opacity: 0.9,
+                depthWrite: false
+            });
+
+            particles = new THREE.Points(particleGeometry, particleMaterial);
+            heartGroup.add(particles);
+
+            calculateHeartShape();
+            updateParticleColors();
+            updateText(HIDDEN_MESSAGE);
+            
+            // 初始化音樂 (不綁定按鈕，只等待第一次點擊)
+            bgMusic = new Audio('music.mp3'); 
+            bgMusic.loop = true; 
+            bgMusic.volume = 0.5; 
+            bgMusic.load(); // iOS 預載入
+
+            // 事件監聽
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('mousemove', onMouseMove, false);
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            
+            animate();
+        }
+
+        // --- 互動觸發 (整合 Touch 和 Click) ---
+        function onCanvasTouchStart(e) {
+            // 1. 播放音樂 (第一次互動時觸發)
+            if (!hasUserInteracted && bgMusic) {
+                bgMusic.play().then(() => {
+                    hasUserInteracted = true;
+                }).catch(err => {
+                    console.log("Audio play failed (waiting for interaction)", err);
+                });
+            }
+
+            // 2. 觸發爆炸
+            if (explosionState === 'idle') {
+                explosionState = 'exploding';
+            }
+        }
+
+        // --- 建立文字 ---
+        function updateText(message) {
+            if (textSprite) {
+                heartGroup.remove(textSprite);
+                if (textSprite.material.map) textSprite.material.map.dispose();
+                textSprite.material.dispose();
+                textSprite = null;
+            }
+            if (!message) return;
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const fontSize = 60;
+            const fontFace = '-apple-system, Arial, sans-serif'; 
+            
+            ctx.font = `bold ${fontSize}px ${fontFace}`;
+            const textWidth = ctx.measureText(message).width;
+            
+            canvas.width = textWidth > 0 ? textWidth + 40 : 200; 
+            canvas.height = fontSize + 40;
+
+            ctx.font = `bold ${fontSize}px ${fontFace}`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(255, 0, 85, 0.8)';
+            ctx.shadowBlur = 15;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(message, canvas.width / 2, canvas.height / 2);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ 
+                map: texture, 
+                transparent: true,
+                depthTest: false,
+                opacity: 0 
+            });
+            
+            textSprite = new THREE.Sprite(spriteMaterial);
+            const scale = 0.1; 
+            textSprite.scale.set(canvas.width * scale, canvas.height * scale, 1);
+            
+            textSprite.position.set(0, -18, 10); 
+            heartGroup.add(textSprite);
+        }
+
+        function calculateHeartShape() {
+            const positions = targetPositions;
+            let i = 0;
+            while (i < PARTICLE_COUNT) {
+                const x = (Math.random() * 3) - 1.5;
+                const y = (Math.random() * 3) - 1.5;
+                const z = (Math.random() * 3) - 1.5;
+
+                const a = x * x + (9/4) * y * y + z * z - 1;
+                const result = Math.pow(a, 3) - x * x * z * z * z - (9/80) * y * y * z * z * z;
+
+                if (result < 0) {
+                    const scale = 10; 
+                    const idx = i * 3;
+                    positions[idx] = x * scale;           
+                    positions[idx + 1] = z * scale;       
+                    positions[idx + 2] = y * scale;       
+                    i++;
+                }
+            }
+        }
+
+        function updateParticleColors() {
+            const colors = particleGeometry.attributes.color.array;
+            const positions = targetPositions; 
+            const minY = -13; 
+            const maxY = 13; 
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                const y = positions[idx + 1];
+                let alpha = (y - minY) / (maxY - minY);
+                alpha = Math.max(0, Math.min(1, alpha)); 
+                const finalColor = colorBottom.clone().lerp(colorTop, alpha);
+                colors[idx] = finalColor.r;
+                colors[idx + 1] = finalColor.g;
+                colors[idx + 2] = finalColor.b;
+            }
+            particleGeometry.attributes.color.needsUpdate = true;
+        }
+
+        // --- 滑鼠移動 (Desktop) ---
+        function onMouseMove(event) {
+            mouseX = (event.clientX / window.innerWidth) * 2 - 1;
+            mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
+        }
+
+        // --- 觸控移動 (iOS) ---
+        function onTouchMove(event) {
+            if (event.touches.length > 0) {
+                const touch = event.touches[0];
+                mouseX = (touch.clientX / window.innerWidth) * 2 - 1;
+                mouseY = -(touch.clientY / window.innerHeight) * 2 + 1;
+            }
+        }
+
+        // --- 動畫循環 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            switch (explosionState) {
+                case 'idle':
+                    targetInteractionFactor = 0;
+                    break;
+                case 'exploding':
+                    targetInteractionFactor = 1.0; 
+                    if (currentInteractionFactor > 0.95) {
+                        explosionState = 'waiting';
+                        waitStartTime = Date.now(); 
+                    }
+                    break;
+                case 'waiting':
+                    targetInteractionFactor = 1.0; 
+                    if (Date.now() - waitStartTime > WAIT_DURATION) {
+                        explosionState = 'gathering';
+                    }
+                    break;
+                case 'gathering':
+                    targetInteractionFactor = 0; 
+                    if (currentInteractionFactor < 0.05) {
+                        explosionState = 'idle';
+                    }
+                    break;
+            }
+
+            let lerpSpeed = (explosionState === 'exploding') ? 0.08 : 0.04;
+            currentInteractionFactor += (targetInteractionFactor - currentInteractionFactor) * lerpSpeed;
+            
+            const explosionForce = currentInteractionFactor * 60.0; 
+            const positions = particleGeometry.attributes.position.array;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                let heartX = targetPositions[idx];
+                let heartY = targetPositions[idx + 1];
+                let heartZ = targetPositions[idx + 2];
+
+                let explodeX = explosionDirections[idx] * explosionForce;
+                let explodeY = explosionDirections[idx + 1] * explosionForce;
+                let explodeZ = explosionDirections[idx + 2] * explosionForce;
+
+                let gravityY = 0;
+                if (currentInteractionFactor > 0.05) {
+                    gravityY = -Math.pow(currentInteractionFactor, 2) * 25.0;
+                }
+
+                let targetX = heartX + explodeX;
+                let targetY = heartY + explodeY + gravityY;
+                let targetZ = heartZ + explodeZ;
+
+                positions[idx] += (targetX - positions[idx]) * 0.1;
+                positions[idx + 1] += (targetY - positions[idx + 1]) * 0.1;
+                positions[idx + 2] += (targetZ - positions[idx + 2]) * 0.1;
+            }
+            
+            particleGeometry.attributes.position.needsUpdate = true;
+
+            if(heartGroup) {
+                heartGroup.rotation.y += 0.008;
+                heartGroup.position.x += (mouseX * 1.5 - heartGroup.position.x) * 0.1;
+                heartGroup.position.y += (mouseY * 1.5 - heartGroup.position.y) * 0.1;
+            }
+
+            if (textSprite && textSprite.material) {
+                const baseScale = 0.1 * textSprite.material.map.image.width;
+                let alpha = Math.max(0, (currentInteractionFactor - 0.5) * 2);
+                textSprite.material.opacity = alpha;
+                const targetScale = baseScale * (0.8 + alpha * 0.2); 
+                textSprite.scale.x += (targetScale - textSprite.scale.x) * 0.1;
+                textSprite.scale.y = textSprite.scale.x * (textSprite.material.map.image.height / textSprite.material.map.image.width);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        window.onload = function() {
+            initThree();
+        };
+
+    </script>
+</body>
+</html>
